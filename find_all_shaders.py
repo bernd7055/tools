@@ -6,6 +6,8 @@ import csv
 import subprocess
 import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple, Set
 
 # --- Helper Functions ---
 
@@ -41,6 +43,18 @@ def find_cs1_asset_path(pkg_name: str, cs1_root: Path) -> Path | None:
         return path_d3d11_us
 
     return None
+
+def unpack_package(pkg_path_in_tmp: Path) -> None:
+    """Unpacks a single asset package using the ed8pkg2gltf script."""
+    print(f"Unpacking {pkg_path_in_tmp}...")
+    try:
+        subprocess.run(
+            ['python', 'ed8pkg2gltf.py', str(pkg_path_in_tmp)],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"FATAL: Error unpacking package {pkg_path_in_tmp}:\n{e.stderr}", file=sys.stderr)
+        sys.exit(1)
 
 # --- Main Script Logic ---
 
@@ -78,6 +92,12 @@ def main():
         default=Path("tmp"),
         help="Path to the temporary working directory."
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=16,
+        help="Maximum number of parallel workers for unpacking assets."
+    )
 
     args = parser.parse_args()
 
@@ -86,57 +106,69 @@ def main():
     MAP_NAME = args.map_name
     ALL_SHADERS_CSV = args.shaders_csv
     TMP_DIR = args.tmp_dir
+    MAX_WORKERS = args.max_workers
 
     # Derived, non-configurable paths
-    DEST_DIR = TMP_DIR / "exact_shaders"
     MAPPING_CSV = TMP_DIR / "shader_mapping.csv"
 
     # --- Pre-run Setup ---
     shader_db = load_shader_database(ALL_SHADERS_CSV)
-    DEST_DIR.mkdir(parents=True, exist_ok=True)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
     map_dir = Path(MAP_NAME)
     if not map_dir.is_dir():
         print(f"FATAL: Map directory '{map_dir}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    # --- Main Processing Loop ---
-    with open(MAPPING_CSV, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['orig', 'closest', 'asset'])
+    # --- Phase 1: Determine which assets to unpack and which shaders to copy ---
+    print("\n--- Phase 1: Computing asset requirements ---")
 
-        glob_pattern = f"{MAP_NAME}/ed8.fx#*.phyre"
-        shader_files = list(Path.cwd().glob(glob_pattern))
-        print(f"Found {len(shader_files)} shaders to process in '{map_dir}'.")
+    shaders_to_process = list(Path.cwd().glob(f"{MAP_NAME}/ed8.fx#*.phyre"))
+    print(f"Found {len(shaders_to_process)} shaders to process in '{map_dir}'.")
 
-        for shader_path in shader_files:
-            base_name = shader_path.stem
-            print(f"--- Processing {base_name} ---")
+    packages_to_unpack: Set[Path] = set()
+    shader_mapping: List[Tuple[str, str, str]] = []
 
-            cs1_pkg = shader_db.get(base_name)
-            closest_shader, shader_name_with_ext = base_name, shader_path.name
+    for shader_path in shaders_to_process:
+        base_name = shader_path.stem
+        closest_shader = base_name
 
-            if not cs1_pkg:
-                print(f"Shader '{base_name}' not in database. Finding a similar one...")
-                try:
-                    result = subprocess.run(
-                        ['python', 'find_similar_shaders.py', f'-s={base_name}', '-g=cs1', '-p=True'],
-                        capture_output=True, text=True, check=True, encoding='utf-8'
-                    )
-                    closest_shader = result.stdout.strip()
-                    cs1_pkg = shader_db.get(closest_shader)
-                    shader_name_with_ext = f"{closest_shader}.phyre"
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
-                    sys.exit(1)
+        # Check if the shader is in the database
+        cs1_pkg = shader_db.get(base_name)
 
-            if not cs1_pkg:
-                print(f"FATAL: Could not find a package for '{base_name}' or alternative '{closest_shader}'.", file=sys.stderr)
+        # If not, find a similar one
+        if not cs1_pkg:
+            print(f"Shader '{base_name}' not in database. Finding a similar one...")
+            try:
+                result = subprocess.run(
+                    ['python', 'find_similar_shaders.py', f'-s={base_name}', '-g=cs1', '-p=True'],
+                    capture_output=True, text=True, check=True, encoding='utf-8'
+                )
+                closest_shader = result.stdout.strip()
+                cs1_pkg = shader_db.get(closest_shader)
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
                 sys.exit(1)
 
-            pkg_path_in_tmp = TMP_DIR / cs1_pkg
-            pkg_base_name = Path(cs1_pkg).stem
-            unpacked_pkg_dir = TMP_DIR / pkg_base_name
+        if not cs1_pkg:
+            print(f"FATAL: Could not find a package for '{base_name}' or alternative '{closest_shader}'.", file=sys.stderr)
+            sys.exit(1)
 
+        # Record the mapping and the package to be unpacked
+        pkg_base_name = Path(cs1_pkg).stem
+        packages_to_unpack.add(Path(cs1_pkg))
+        asset_path_for_csv = f"tmp/{pkg_base_name}/"
+        shader_mapping.append((base_name, closest_shader, asset_path_for_csv))
+
+    print(f"Identified {len(packages_to_unpack)} unique packages to unpack.")
+
+    # --- Phase 2: Unpack assets in parallel ---
+    print("\n--- Phase 2: Unpacking assets in parallel ---")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Copy necessary packages to the temporary directory
+        futures = []
+        for cs1_pkg in packages_to_unpack:
+            pkg_path_in_tmp = TMP_DIR / cs1_pkg
             if not pkg_path_in_tmp.is_file():
                 source_pkg_path = find_cs1_asset_path(cs1_pkg, CS1_ROOT)
                 if source_pkg_path:
@@ -144,34 +176,36 @@ def main():
                 else:
                     print(f"FATAL: Cannot find source package '{cs1_pkg}'.", file=sys.stderr)
                     sys.exit(1)
+            # Submit the unpacking task to the thread pool
+            futures.append(executor.submit(unpack_package, pkg_path_in_tmp))
 
-            asset_path_for_csv = f"tmp/{pkg_base_name}/"
-            writer.writerow([base_name, closest_shader, asset_path_for_csv])
+        # Wait for all unpacking tasks to complete
+        for future in as_completed(futures):
+            future.result()  # This will re-raise any exceptions from the worker threads
 
-            if not unpacked_pkg_dir.is_dir():
-                print(f"Unpacking {pkg_path_in_tmp}...")
-                try:
-                    subprocess.run(
-                        ['python', 'ed8pkg2gltf.py', str(pkg_path_in_tmp)],
-                        check=True, capture_output=True, text=True
-                    )
-                except subprocess.CalledProcessError as e:
-                    print(f"FATAL: Error unpacking package {pkg_path_in_tmp}:\n{e.stderr}", file=sys.stderr)
-                    sys.exit(1)
+    print("All packages unpacked successfully.")
+
+    # --- Phase 3: Copy all shaders and write the mapping file (single-threaded) ---
+    print("\n--- Phase 3: Copying shaders and writing mapping file ---")
+
+    with open(MAPPING_CSV, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['orig', 'closest', 'asset'])
+
+        for orig_shader, closest_shader, asset_path_for_csv in shader_mapping:
+            writer.writerow([orig_shader, closest_shader, asset_path_for_csv])
+
+            pkg_base_name = Path(asset_path_for_csv.replace('tmp/', '')).stem
+            unpacked_pkg_dir = TMP_DIR / pkg_base_name
+            shader_name_with_ext = f"{closest_shader}.phyre"
 
             final_shader_source = unpacked_pkg_dir / pkg_base_name / shader_name_with_ext
             if final_shader_source.is_file():
-                shutil.copy(final_shader_source, DEST_DIR)
+                shutil.copy(final_shader_source, map_dir)
+                print(f" -> Copied {final_shader_source.name} to {map_dir}")
             else:
-                print(f"FATAL: Final shader '{shader_name_with_ext}' not found in unpacked package.", file=sys.stderr)
+                print(f"FATAL: Final shader '{shader_name_with_ext}' not found in unpacked package '{unpacked_pkg_dir}'.", file=sys.stderr)
                 sys.exit(1)
-
-    # --- Final Step ---
-    print(f"Copying all found shaders from {DEST_DIR} to {map_dir}/")
-    for found_shader in DEST_DIR.glob('*'):
-        if found_shader.is_file():
-            shutil.copy(found_shader, map_dir)
-            print(f"  -> Copied {found_shader.name}")
 
 if __name__ == "__main__":
     main()
