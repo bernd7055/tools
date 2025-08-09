@@ -14,6 +14,8 @@ from typing import List, Tuple, Set
 
 # --- Helper Functions ---
 
+DEBUG=False
+
 def load_shader_database(csv_path: Path) -> dict[str, str]:
     """
     Parses the shader CSV file once and loads it into a dictionary for fast lookups.
@@ -49,10 +51,11 @@ def find_cs1_asset_path(cs1_root: Path, pkg_name: str) -> Path | None:
 
 def unpack_package(pkg_path_in_tmp: Path) -> None:
     """Unpacks a single asset package using the ed8pkg2gltf script."""
-    print(f"Unpacking {pkg_path_in_tmp}...")
     if os.path.exists(pkg_path_in_tmp.with_suffix("")):
-        print(f"{pkg_path_in_tmp} already unpacked")
+        if DEBUG:
+            print(f"{pkg_path_in_tmp} already unpacked")
         return
+    print(f"Unpacking {pkg_path_in_tmp}...")
     try:
         subprocess.run(
             ['python', 'ed8pkg2gltf.py', str(pkg_path_in_tmp)],
@@ -99,6 +102,80 @@ def find_appropriate_cs1_shaders(
         shader_mapping.append((base_name, closest_shader, asset_path_for_csv))
 
     return packages_to_unpack, shader_mapping
+
+def replace_materials(
+        shader_mapping: Tuple[str,str,str],
+        metadata_filepath: Path,
+        map_dir: Path):
+    with open(metadata_filepath, 'rb') as f:
+        metadata = json.loads(f.read())
+    shader_map = dict((row[0], (row[1],row[2])) for row in shader_mapping)
+    files_to_shaders_to_materials = {}
+    mats = metadata["materials"]
+    for (m, v) in mats.items():
+        shader = v["shader"].removeprefix("shaders/")
+        if shader in shader_map:
+            mapping = shader_map[shader]
+            replace_shader, file = mapping[0], mapping[1]
+            if shader != replace_shader:
+                shader = replace_shader
+                v["shader"] = "shaders/"+shader
+                if "vertex_color_shader" in v:
+                    v["vertex_color_shader"] = "shaders/"+shader
+            if not file in files_to_shaders_to_materials:
+                files_to_shaders_to_materials[file]={}
+            shader_to_material = files_to_shaders_to_materials[file]
+            if not shader in shader_to_material:
+                shader_to_material[shader] = []
+            shader_to_material[shader].append(m)
+    for (donor_asset, stm) in files_to_shaders_to_materials.items():
+        donor_mats = {}
+        for d in glob.glob(str(donor_asset)+"/metadata*.json"):
+            with open(d, 'rb') as f:
+                donor = json.loads(f.read())
+                donor_mats.update({ v["shader"].removeprefix("shaders/"): v for (k,v) in donor["materials"].items() if v["shader"].removeprefix("shaders/") in stm })
+        for (s, ms) in stm.items():
+            # Copy the shader.
+            shader_source = Path(f"{donor_asset}/{Path(donor_asset).stem}/{s}.phyre")
+            if shader_source.is_file():
+                shutil.copy(shader_source, map_dir)
+                if DEBUG:
+                    print(f"Copied {shader_source} to {map_dir}")
+            else:
+                print(f"FATAL: Final shader '{shader_source}' not found in unpacked package '{donor_asset}'.", file=sys.stderr)
+                sys.exit(1)
+            # Update the materials.
+            donor_mat = donor_mats[s]
+            for m in ms:
+                mats[m] = merge_mats(mats[m], donor_mat)
+
+    res = json.dumps(metadata, indent=4)
+    with open(metadata_filepath, 'w') as f:
+        f.write(res)
+
+# merge_dicts merges dic src into dict dst:
+#   * keeps values of dst if key exists in both
+#   * adds keys and value if key exists only in src
+#   * removes keys if key only exists in dst
+def merge_dicts(dst, src):
+    res = {}
+    for (k,v) in src.items():
+        if k in dst:
+            res[k] = dst[k]
+        else:
+            res[k] = src[k]
+    return res
+
+# merge_mats merges the shaderParameters and shaderSamplerDefs:
+#   * keeps values of dst if key exists in both
+#   * adds keys and value if key exists only in src
+#   * removes keys if key only exists in dst
+def merge_mats(dst, src):
+    dst["shaderParameters"] = merge_dicts(dst["shaderParameters"], src["shaderParameters"])
+    dst["shaderSamplerDefs"] = merge_dicts(dst["shaderSamplerDefs"], src["shaderSamplerDefs"])
+    if "shaderSwitches" in dst:
+        dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
+    return dst
 
 # --- Main Script Logic ---
 
@@ -151,9 +228,6 @@ def main():
     ALL_SHADERS_CSV = args.shaders_csv
     TMP_DIR = args.tmp_dir
     MAX_WORKERS = args.max_workers
-
-    # Derived, non-configurable paths
-    MAPPING_CSV = TMP_DIR / "shader_mapping.csv"
 
     # --- Pre-run Setup ---
     shader_db = load_shader_database(ALL_SHADERS_CSV)
@@ -235,26 +309,10 @@ def main():
     print("All packages unpacked successfully.")
 
     # --- Phase 3: Copy all shaders and write the mapping file (single-threaded) ---
-    print("\n--- Phase 3: Copying shaders and writing mapping file ---")
-
-    with open(MAPPING_CSV, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['orig', 'closest', 'asset'])
-
-        for orig_shader, closest_shader, asset_path_for_csv in shader_mapping:
-            writer.writerow([orig_shader, closest_shader, asset_path_for_csv])
-
-            pkg_base_name = asset_path_for_csv.stem
-            unpacked_pkg_dir = TMP_DIR / pkg_base_name
-            shader_name_with_ext = f"{closest_shader}.phyre"
-
-            final_shader_source = unpacked_pkg_dir / pkg_base_name / shader_name_with_ext
-            if final_shader_source.is_file():
-                shutil.copy(final_shader_source, map_dir)
-                print(f"Copied {final_shader_source} to {map_dir}")
-            else:
-                print(f"FATAL: Final shader '{shader_name_with_ext}' not found in unpacked package '{unpacked_pkg_dir}'.", file=sys.stderr)
-                sys.exit(1)
+    print("\n--- Phase 3: Copying shaders and updating metadata file ---")
+    # TODO loop over all metadata*.json?
+    metadata_path = Path("metadata.json")
+    replace_materials(shader_mapping, metadata_path, map_dir)
 
 if __name__ == "__main__":
     main()
