@@ -83,7 +83,7 @@ def find_appropriate_cs1_shaders(
             print(f"Shader '{base_name}' not in database. Finding a similar one...")
             try:
                 result = subprocess.run(
-                    ['python', 'find_similar_shaders.py', f'-s={base_name}', '-g=cs1', '-p=True'],
+                    ['python', 'find_similar_shaders.py', f'-s={base_name}', '-g=cs1', '--no-report'],
                     capture_output=True, text=True, check=True, encoding='utf-8'
                 )
                 closest_shader = result.stdout.strip()
