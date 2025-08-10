@@ -177,8 +177,8 @@ def merge_mats(dst, src):
     if "shaderSwitches" in dst:
         if "shaderSwitches" in src:
             dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
-        else:
-            del(dst["shaderSwitches"])
+  #      else:
+  #          del(dst["shaderSwitches"])
     return dst
 
 # --- Main Script Logic ---
@@ -249,6 +249,8 @@ def main():
     print(f"Found {len(shaders)} shaders to process in '{map_dir}'.")
 
     packages_to_unpack, shader_mapping =  find_appropriate_cs1_shaders(shaders, shader_db, TMP_DIR)
+    if DEBUG:
+        print(shader_mapping)
 
     print(f"Identified {len(packages_to_unpack)} unique packages to unpack.")
 
