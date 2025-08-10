@@ -134,6 +134,7 @@ def replace_materials(
             with open(d, 'rb') as f:
                 donor = json.loads(f.read())
                 donor_mats.update({ v["shader"].removeprefix("shaders/"): v for (k,v) in donor["materials"].items() if v["shader"].removeprefix("shaders/") in stm })
+                donor_mats.update({ v["shader"].removeprefix("Shaders/"): v for (k,v) in donor["materials"].items() if v["shader"].removeprefix("Shaders/") in stm })
         for (s, ms) in stm.items():
             # Copy the shader.
             shader_source = Path(f"{donor_asset}/{Path(donor_asset).stem}/{s}.phyre")
@@ -174,7 +175,10 @@ def merge_mats(dst, src):
     dst["shaderParameters"] = merge_dicts(dst["shaderParameters"], src["shaderParameters"])
     dst["shaderSamplerDefs"] = merge_dicts(dst["shaderSamplerDefs"], src["shaderSamplerDefs"])
     if "shaderSwitches" in dst:
-        dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
+        if "shaderSwitches" in src:
+            dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
+        else:
+            del(dst["shaderSwitches"])
     return dst
 
 # --- Main Script Logic ---
