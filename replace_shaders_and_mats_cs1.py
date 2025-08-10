@@ -194,13 +194,12 @@ def main():
         required=True,
         help="Required: Root directory for cs1 steam game (e.g., 'Steam/steamapps/common/Trails of Cold Steel')."
     )
+    # Arguments with default values
     parser.add_argument(
         "--map-name",
         type=str,
-        required=True,
         help="Required: The directory containing the shader files that should be replaces (e.g., 'M_T4040' after extracing with 'python ed8pkg2gltf M_T4040.pkg')."
     )
-    # Arguments with default values
     parser.add_argument(
         "--shaders-csv",
         type=Path,
@@ -225,6 +224,8 @@ def main():
     # --- Configuration from Arguments ---
     CS1_ROOT = args.cs1_root
     MAP_NAME = args.map_name
+    if not MAP_NAME:
+        MAP_NAME = Path.cwd().stem
     ALL_SHADERS_CSV = args.shaders_csv
     TMP_DIR = args.tmp_dir
     MAX_WORKERS = args.max_workers
