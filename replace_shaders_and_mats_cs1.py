@@ -65,6 +65,26 @@ def unpack_package(pkg_path_in_tmp: Path) -> None:
         print(f"FATAL: Error unpacking package {pkg_path_in_tmp}:\n{e.stderr}", file=sys.stderr)
         sys.exit(1)
 
+def run_find_similar_shaders(
+        shader_db: dict[str, str],
+        shader_base_name: str,
+        allow_texture_difference: bool) -> Tuple[str,str]:
+            try:
+                cli_args = ['python', 'find_similar_shaders.py', f'-s={shader_base_name}', '-g=cs1', '-nr']
+                if not allow_texture_difference:
+                    cli_args.append('-nt')
+                result = subprocess.run(
+                    cli_args,
+                    capture_output=True, text=True, check=True, encoding='utf-8'
+                )
+                closest_shader = result.stdout.strip()
+                cs1_pkg = shader_db.get(closest_shader)
+                print(f"\t...found {closest_shader} in {cs1_pkg} as replacement.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
+                sys.exit(1)
+            return closest_shader, cs1_pkg
+
 def find_appropriate_cs1_shaders(
         shaders: [Path],
         shader_db: dict[str, str],
@@ -81,17 +101,30 @@ def find_appropriate_cs1_shaders(
         # If not, find a similar one
         if not cs1_pkg:
             print(f"Shader '{base_name}' not in database. Finding a similar one...")
+
             try:
+                cli_args = [
+                    'python',
+                    'find_similar_shaders.py',
+                    f'-s={base_name}',
+                    '-g=cs1',
+                    '-nr',
+                    '-w=texture_slot=added=10000,texture_slot=removed=100']
                 result = subprocess.run(
-                    ['python', 'find_similar_shaders.py', f'-s={base_name}', '-g=cs1', '--no-report'],
+                    cli_args,
                     capture_output=True, text=True, check=True, encoding='utf-8'
                 )
                 closest_shader = result.stdout.strip()
                 cs1_pkg = shader_db.get(closest_shader)
+                print(f"\t...found {closest_shader} in {cs1_pkg} as replacement.")
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
                 sys.exit(1)
-
+#            closest_shader, cs1_pkg = run_find_similar_shaders(shader_db, base_name, False)
+#            if closest_shader == "":
+#                # Sometimes there is no shader with the same texture slots.
+#                # Fall back to allow dropping texture slots.
+#                closest_shader, cs1_pkg = run_find_similar_shaders(shader_db, base_name, True)
         if not cs1_pkg:
             print(f"FATAL: Could not find a package for '{base_name}' or alternative '{closest_shader}'.", file=sys.stderr)
             sys.exit(1)
@@ -174,11 +207,10 @@ def merge_dicts(dst, src):
 def merge_mats(dst, src):
     dst["shaderParameters"] = merge_dicts(dst["shaderParameters"], src["shaderParameters"])
     dst["shaderSamplerDefs"] = merge_dicts(dst["shaderSamplerDefs"], src["shaderSamplerDefs"])
+    dst["shaderTextures"] = merge_dicts(dst["shaderTextures"], src["shaderTextures"])
     if "shaderSwitches" in dst:
         if "shaderSwitches" in src:
             dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
-  #      else:
-  #          del(dst["shaderSwitches"])
     return dst
 
 # --- Main Script Logic ---
@@ -219,7 +251,7 @@ def main():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=16,
+        default=os.cpu_count(),
         help="Maximum number of parallel workers for unpacking assets."
     )
 
@@ -318,6 +350,8 @@ def main():
     # --- Phase 3: Copy all shaders and write the mapping file (single-threaded) ---
     print("\n--- Phase 3: Copying shaders and updating metadata file ---")
     # TODO loop over all metadata*.json?
+    for shader_path in shaders:
+        os.remove(shader_path)
     metadata_path = Path("metadata.json")
     replace_materials(shader_mapping, metadata_path, map_dir)
 
