@@ -12,5 +12,7 @@ There are some known limitations:
   doesn't for others).
 * The script doesn't handle .ops files and the associated objects references
   in these .ops files. Resulting maps might be missing objects.
+* Sometimes the maps don't have the SpecularMapSampler set. This script sets
+  them to the DiffuseMapSampler which doesn't make sense visually.
 
 We expect to fix these over time.

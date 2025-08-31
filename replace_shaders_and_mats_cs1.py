@@ -208,6 +208,11 @@ def merge_mats(dst, src):
     dst["shaderParameters"] = merge_dicts(dst["shaderParameters"], src["shaderParameters"])
     dst["shaderSamplerDefs"] = merge_dicts(dst["shaderSamplerDefs"], src["shaderSamplerDefs"])
     dst["shaderTextures"] = merge_dicts(dst["shaderTextures"], src["shaderTextures"])
+    # This is a work around for a bug in the extractor that sometimes
+    # doesn't extract the SpecularMap
+    if "SpecularMapSampler" in dst["shaderTextures"]:
+        if dst["shaderTextures"]["SpecularMapSampler"] == "":
+            dst["shaderTextures"]["SpecularMapSampler"] = dst["shaderTextures"]["DiffuseMapSampler"]
     if "shaderSwitches" in dst:
         if "shaderSwitches" in src:
             dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
@@ -227,7 +232,6 @@ def main():
     parser.add_argument(
         "--cs1-root",
         type=Path,
-        required=True,
         help="Required: Root directory for cs1 steam game (e.g., 'Steam/steamapps/common/Trails of Cold Steel')."
     )
     # Arguments with default values
@@ -259,6 +263,8 @@ def main():
 
     # --- Configuration from Arguments ---
     CS1_ROOT = args.cs1_root
+    while not CS1_ROOT or not os.path.exists(CS1_ROOT):
+        CS1_ROOT = Path(input("Please enter the path to your CS1 installation (e.g. 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Trails of Cold Steel': "))
     MAP_NAME = args.map_name
     if not MAP_NAME:
         MAP_NAME = Path.cwd().stem
