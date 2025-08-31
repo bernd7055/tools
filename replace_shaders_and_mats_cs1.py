@@ -49,7 +49,7 @@ def find_cs1_asset_path(cs1_root: Path, pkg_name: str) -> Path | None:
 
     return None
 
-def unpack_package(pkg_path_in_tmp: Path) -> None:
+def unpack_package(pkg_path_in_tmp: Path, packtools_dir: Path) -> None:
     """Unpacks a single asset package using the ed8pkg2gltf script."""
     if os.path.exists(pkg_path_in_tmp.with_suffix("")):
         if DEBUG:
@@ -58,37 +58,18 @@ def unpack_package(pkg_path_in_tmp: Path) -> None:
     print(f"Unpacking {pkg_path_in_tmp}...")
     try:
         subprocess.run(
-            ['python', 'ed8pkg2gltf.py', str(pkg_path_in_tmp)],
+            ['python', str(packtools_dir/'ed8pkg2gltf.py'), str(pkg_path_in_tmp)],
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
         print(f"FATAL: Error unpacking package {pkg_path_in_tmp}:\n{e.stderr}", file=sys.stderr)
         sys.exit(1)
 
-def run_find_similar_shaders(
-        shader_db: dict[str, str],
-        shader_base_name: str,
-        allow_texture_difference: bool) -> Tuple[str,str]:
-            try:
-                cli_args = ['python', 'find_similar_shaders.py', f'-s={shader_base_name}', '-g=cs1', '-nr']
-                if not allow_texture_difference:
-                    cli_args.append('-nt')
-                result = subprocess.run(
-                    cli_args,
-                    capture_output=True, text=True, check=True, encoding='utf-8'
-                )
-                closest_shader = result.stdout.strip()
-                cs1_pkg = shader_db.get(closest_shader)
-                print(f"\t...found {closest_shader} in {cs1_pkg} as replacement.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
-                sys.exit(1)
-            return closest_shader, cs1_pkg
-
 def find_appropriate_cs1_shaders(
         shaders: [Path],
         shader_db: dict[str, str],
-        TMP_DIR: Path) -> Tuple[Set[Path], List[Tuple[str, str, str]]]:
+        TMP_DIR: Path,
+        packtools_dir: Path) -> Tuple[Set[Path], List[Tuple[str, str, str]]]:
     packages_to_unpack: Set[Path] = set()
     shader_mapping: List[Tuple[str, str, str]] = []
     for shader_path in shaders:
@@ -105,7 +86,7 @@ def find_appropriate_cs1_shaders(
             try:
                 cli_args = [
                     'python',
-                    'find_similar_shaders.py',
+                    str(packtools_dir/'find_similar_shaders.py'),
                     f'-s={base_name}',
                     '-g=cs1',
                     '-nr',
@@ -120,11 +101,6 @@ def find_appropriate_cs1_shaders(
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
                 sys.exit(1)
-#            closest_shader, cs1_pkg = run_find_similar_shaders(shader_db, base_name, False)
-#            if closest_shader == "":
-#                # Sometimes there is no shader with the same texture slots.
-#                # Fall back to allow dropping texture slots.
-#                closest_shader, cs1_pkg = run_find_similar_shaders(shader_db, base_name, True)
         if not cs1_pkg:
             print(f"FATAL: Could not find a package for '{base_name}' or alternative '{closest_shader}'.", file=sys.stderr)
             sys.exit(1)
@@ -258,6 +234,21 @@ def main():
         default=os.cpu_count(),
         help="Maximum number of parallel workers for unpacking assets."
     )
+    parser.add_argument(
+        "--packtools-dir",
+        type=Path,
+        default=Path("."),
+        help="Path to the directory containing the (un)pack tools from https://github.com/eArmada8/ed8pkg2gltf (including the find_similar_shaders.py and all_shaders.csv)."
+    )
+
+    parser.add_argument(
+        "target",
+        type=Path,
+        metavar='M_T4040/',
+        nargs='?',
+        default='.',
+        help="The directory of the unpacked asset to replace shaders and materials in."
+    )
 
     args = parser.parse_args()
 
@@ -265,17 +256,29 @@ def main():
     CS1_ROOT = args.cs1_root
     while not CS1_ROOT or not os.path.exists(CS1_ROOT):
         CS1_ROOT = Path(input("Please enter the path to your CS1 installation (e.g. 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Trails of Cold Steel': "))
+
+    DIR_TO_PORT = args.target
+    if not DIR_TO_PORT:
+        DIR_TO_PORT = Path.cwd()
     MAP_NAME = args.map_name
     if not MAP_NAME:
-        MAP_NAME = Path.cwd().stem
-    ALL_SHADERS_CSV = args.shaders_csv
+        MAP_NAME = DIR_TO_PORT.stem
     TMP_DIR = args.tmp_dir
     MAX_WORKERS = args.max_workers
+    PACKTOOLS_DIR = args.packtools_dir
+    ALL_SHADERS_CSV = args.shaders_csv
+    if not os.path.exists(ALL_SHADERS_CSV):
+        ALL_SHADERS_CSV = PACKTOOLS_DIR/ALL_SHADERS_CSV
+        if not os.path.exists(ALL_SHADERS_CSV):
+            print(f"cannot find shader database {ALL_SHADERS_CSV}")
+            sys.exit(1)
+
+
 
     # --- Pre-run Setup ---
     shader_db = load_shader_database(ALL_SHADERS_CSV)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    map_dir = Path(MAP_NAME)
+    map_dir = DIR_TO_PORT/Path(MAP_NAME)
     if not map_dir.is_dir():
         print(f"FATAL: Map directory '{map_dir}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -283,10 +286,10 @@ def main():
     # --- Phase 1: Determine which assets to unpack and which shaders to copy ---
     print("\n--- Phase 1: Computing asset requirements ---")
 
-    shaders = list(Path.cwd().glob(f"{MAP_NAME}/ed8.fx#*.phyre"))
+    shaders = list(DIR_TO_PORT.glob(f"{MAP_NAME}/ed8.fx#*.phyre"))
     print(f"Found {len(shaders)} shaders to process in '{map_dir}'.")
 
-    packages_to_unpack, shader_mapping =  find_appropriate_cs1_shaders(shaders, shader_db, TMP_DIR)
+    packages_to_unpack, shader_mapping =  find_appropriate_cs1_shaders(shaders, shader_db, TMP_DIR, PACKTOOLS_DIR)
     if DEBUG:
         print(shader_mapping)
 
@@ -308,7 +311,7 @@ def main():
                     print(f"FATAL: Cannot find source package '{cs1_pkg}'.", file=sys.stderr)
                     sys.exit(1)
             # Submit the unpacking task to the thread pool
-            futures.append(executor.submit(unpack_package, pkg_path_in_tmp))
+            futures.append(executor.submit(unpack_package, pkg_path_in_tmp, PACKTOOLS_DIR))
 
         # Wait for all unpacking tasks to complete
         for future in as_completed(futures):
@@ -347,7 +350,7 @@ def main():
             print(f"FATAL: Cannot find source package '{cs1_pkg}'.", file=sys.stderr)
             sys.exit(1)
         dest_path = TMP_DIR / well_known_asset
-        unpack_package(dest_path)
+        unpack_package(dest_path, PACKTOOLS_DIR)
         for d in defaults:
             shader_mapping.append((d, d, dest_path.with_suffix("")))
 
@@ -358,8 +361,9 @@ def main():
     # TODO loop over all metadata*.json?
     for shader_path in shaders:
         os.remove(shader_path)
-    metadata_path = Path("metadata.json")
-    replace_materials(shader_mapping, metadata_path, map_dir)
+
+    for metadata_path in DIR_TO_PORT.glob(f"metadata*.json"):
+        replace_materials(shader_mapping, metadata_path, map_dir)
 
 if __name__ == "__main__":
     main()
