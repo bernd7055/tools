@@ -81,6 +81,8 @@ class AssetPorter:
         # We should fix build_collada.py eventually...
         asset_dir = str(src_asset_tmp_path.with_suffix(''))
         for f in self.packtools_dir.glob('[a-z][A-Z]*'):
+            if os.path.isdir(f):
+                continue
             # For some reason windows does not allow copying byte identical
             # files. So only copy it if it does not yet exist.
             path = Path(asset_dir)/Path(f).name
