@@ -18,7 +18,9 @@ class AssetPorter:
             dst_root: Path,
             tmp_dir: Path,
             out_dir: Path,
-            packtools_dir: Path):
+            packtools_dir: Path,
+            flip_textures_vertically: bool,
+            ):
         self.src_root = src_root
         self.dst_root = dst_root
         self.tmp_dir = tmp_dir
@@ -31,7 +33,7 @@ class AssetPorter:
 
         if os.path.exists(self.out_dir/asset_file):
                # asset already exists in the destination game
-               print(f"skipping {asset} because it already exists in out dir")
+               print(f"skipping {asset} because it already exists in out dir", file=sys.stderr)
                return
 
         src_asset_path = self.src_root/'data'/'asset'/'D3D11'/asset_file
@@ -42,7 +44,7 @@ class AssetPorter:
         src_asset_tmp_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src_asset_path, src_asset_tmp_path)
 
-        print(f"Unpacking {asset_file}...")
+        print(f"Unpacking {asset_file}...", file=sys.stderr)
         try:
             unpacker = self.packtools_dir/'ed8pkg2gltf.py'
             subprocess.run(
@@ -53,7 +55,7 @@ class AssetPorter:
             print(f"FATAL: Error unpacking package {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
             sys.exit(1)
 
-        print(f"Replacing shaders and material...")
+        print(f"Replacing shaders and material...", file=sys.stderr)
         try:
             tmp_dst_assets = self.tmp_dir/'dst'
             replacer = self.packtools_dir/'replace_shaders_and_mats_cs1.py'
@@ -70,26 +72,64 @@ class AssetPorter:
             print(f"FATAL: Error replacing shaders and materials {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
             sys.exit(1)
 
-        # Does not work on linux right now skip
+        # The rest of the script does not work on linux right now skip
         if os.path.exists('/proc/self'):
-            print(f"Terminating early because packing doesn't work on linux")
-            sys.exit(0)
+            print(f"Skip packing because packing doesn't work on linux", file=sys.stderr)
+            return
 
-        print(f"Packing asset {src_asset_tmp_path}...")
+        texconv_path = self.packtools_dir/'texconv.exe'
+        asset_dir = Path(src_asset_tmp_path.with_suffix(''))
+        print(f"Flipping texture vertically in {asset_dir}...", file=sys.stderr)
+        for texture in asset_dir.glob('**/**.dds'):
+            try:
+                tmp_dst_assets = self.tmp_dir/'dst'
+                replacer = self.packtools_dir/'replace_shaders_and_mats_cs1.py'
+                subprocess.run([
+                        texconv_path,
+                        '-vflip',
+                        '-o', os.path.dirname(texture),
+                        '-y',
+                        texture],
+                    check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
+                )
+            except subprocess.CalledProcessError as e:
+                print(f"FATAL: Error flipping texture {texture}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
+                sys.exit(1)
+
+
+
+        print(f"Packing asset {src_asset_tmp_path}...", file=sys.stderr)
         # The build_collada.py cannot properly model output path, etc. for now
-        # just copy everything over to not have to think about it...
+        # just copy over everything we need.
         # We should fix build_collada.py eventually...
-        asset_dir = str(src_asset_tmp_path.with_suffix(''))
-        for f in self.packtools_dir.glob('[a-z][A-Z]*'):
-            if os.path.isdir(f):
-                continue
+        needed_pack_tools = [
+                'replace_shader_references.py',
+                'lib_fmtibvb.py'
+                'build_collada_cs1.py',
+                'build_collda.py',
+                'write_pkg.py',
+                'sentools.exe',
+                'PhyreAssetProcessor.exe',
+                'PhyreAssetDatabase.dll',
+                'PhyreAssetDatabaseUnmanaged.dll',
+                'PhyreAssetProcessor.dll',
+                'PhyreAssetScript.lua',
+                'PhyreAssetServices.dll',
+                'PhyreAssetSpec.xml',
+                'PhyreDummyShaderCreator.exe',
+                'PhyreTools.Core.dll',
+        ]
+        for f in need_pack_tools:
+            src = self.packtools_dir/f
+            if not os.path.exists(f):
+                print(f"packtool {f} missing. Cannot proceed. Please add {f} to {self.packtools_dir}.", file=sys.stderr)
             # For some reason windows does not allow copying byte identical
             # files. So only copy it if it does not yet exist.
-            path = Path(asset_dir)/Path(f).name
-            if not os.path.exists(path):
-                shutil.copy(f, asset_dir)
+            dst = Path(asset_dir)/Path(src).name
+            if not os.path.exists(dst):
+                shutil.copy(src, asset_dir)
             else:
-                print(f"{path} already exists, skip copying")
+                print(f"{dst} already exists, skip copying", file=sys.stderr)
 
         try:
             build_collada = src_asset_tmp_path.with_suffix('')/'build_collada_cs1.py'
@@ -114,7 +154,7 @@ class AssetPorter:
             sys.exit(1)
 
         shutil.copy(src_asset_tmp_path.with_suffix('')/Path(asset+'.pkg'), self.out_dir)
-        print(f"finished packing {asset}")
+        print(f"finished packing {asset}", file=sys.stderr)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -151,7 +191,14 @@ def main():
         "--packtools-dir",
         type=Path,
         default=Path("."),
-        help="Path to the directory containing the (un)pack tools from https://github.com/eArmada8/ed8pkg2gltf (including the find_similar_shaders.py and all_shaders.csv) and the shader replace tool from https://github.com/bernd7055/tools/blob/main/replace_shaders_and_mats_cs1.py."
+        help="Path to the directory containing the (un)pack tools from https://github.com/eArmada8/ed8pkg2gltf (including the find_similar_shaders.py, all_shaders.csv and the texture converter tool) and the shader replace tool from https://github.com/bernd7055/tools/blob/main/replace_shaders_and_mats_cs1.py."
+    )
+    parser.add_argument(
+        '--texture-flipping',
+        dest='flip_textures_vertically',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Flip all textures vertically before repacking the assets.'
     )
     parser.add_argument(
             'ops_files',
@@ -194,7 +241,8 @@ def main():
             dst_root = CS1_ROOT,
             tmp_dir = TMP_DIR,
             out_dir = OUT_DIR,
-            packtools_dir = PACKTOOLS_DIR)
+            packtools_dir = PACKTOOLS_DIR,
+            flip_textures_vertically = args.flip_textures_vertically)
 
     for asset in assets:
         asset_porter.port(asset)
