@@ -104,9 +104,9 @@ class AssetPorter:
         # We should fix build_collada.py eventually...
         needed_pack_tools = [
                 'replace_shader_references.py',
-                'lib_fmtibvb.py'
+                'lib_fmtibvb.py',
                 'build_collada_cs1.py',
-                'build_collda.py',
+                'build_collada.py',
                 'write_pkg.py',
                 'sentools.exe',
                 'PhyreAssetProcessor.exe',
@@ -119,10 +119,11 @@ class AssetPorter:
                 'PhyreDummyShaderCreator.exe',
                 'PhyreTools.Core.dll',
         ]
-        for f in need_pack_tools:
+        for f in needed_pack_tools:
             src = self.packtools_dir/f
-            if not os.path.exists(f):
-                print(f"packtool {f} missing. Cannot proceed. Please add {f} to {self.packtools_dir}.", file=sys.stderr)
+            if not os.path.exists(src):
+                print(f"packtool '{f}' missing. Cannot proceed. Please add '{f}' to '{self.packtools_dir}'.", file=sys.stderr)
+                sys.exit(1)
             # For some reason windows does not allow copying byte identical
             # files. So only copy it if it does not yet exist.
             dst = Path(asset_dir)/Path(src).name
