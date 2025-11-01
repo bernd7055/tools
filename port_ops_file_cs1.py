@@ -80,7 +80,7 @@ class AssetPorter:
         texconv_path = self.packtools_dir/'texconv.exe'
         asset_dir = Path(src_asset_tmp_path.with_suffix(''))
         print(f"Flipping texture vertically in {asset_dir}...", file=sys.stderr)
-        for texture in asset_dir.glob('**/**.dds'):
+        for texture in asset_dir.glob('**/*.dds'):
             try:
                 tmp_dst_assets = self.tmp_dir/'dst'
                 replacer = self.packtools_dir/'replace_shaders_and_mats_cs1.py'
