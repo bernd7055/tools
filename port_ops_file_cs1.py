@@ -145,7 +145,7 @@ class AssetPorter:
             if not os.path.exists(dst):
                 shutil.copy(src, asset_dir)
             else:
-                logger.log(f"{dst} already exists, skip copying", file=sys.stderr)
+                logger.log(f"{dst} already exists, skip copying")
 
         try:
             build_collada = src_asset_tmp_path.with_suffix('')/'build_collada_cs1.py'

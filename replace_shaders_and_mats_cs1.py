@@ -90,7 +90,7 @@ def find_appropriate_cs1_shaders(
                     f'-s={base_name}',
                     '-g=cs1',
                     '-nr',
-                    '-w=texture_slot=added=10000,texture_slot=removed=100']
+                    f'-w=shader_weights.txt']
                 result = subprocess.run(
                     cli_args,
                     capture_output=True, text=True, check=True, encoding='utf-8'
