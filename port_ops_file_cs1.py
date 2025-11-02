@@ -11,6 +11,18 @@ import xml.etree.ElementTree as xml
 
 DEBUG=False
 
+class Logger:
+    def __init__(self):
+        self.log_lines = []
+
+    def log(self, msg):
+        print(msg, file=sys.stderr)
+        self.log_lines.append(msg)
+
+    def get_log(self):
+        return '\n'.join(self.log_lines)
+
+
 class AssetPorter:
     def __init__(
             self, # AssetPorter, python does not support forward references -.-
@@ -28,7 +40,8 @@ class AssetPorter:
         self.out_dir = out_dir
         self.packtools_dir = packtools_dir
 
-    def port(self, asset: str):
+    def port(self, asset: str) -> Logger | None:
+        logger = Logger()
         asset_file = asset + '.pkg'
 
         if os.path.exists(self.out_dir/asset_file):
@@ -44,7 +57,7 @@ class AssetPorter:
         src_asset_tmp_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src_asset_path, src_asset_tmp_path)
 
-        print(f"Unpacking {asset_file}...", file=sys.stderr)
+        logger.log(f"Unpacking {asset_file}...")
         try:
             unpacker = self.packtools_dir/'ed8pkg2gltf.py'
             subprocess.run(
@@ -52,10 +65,10 @@ class AssetPorter:
                 check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError as e:
-            print(f"FATAL: Error unpacking package {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
-            sys.exit(1)
+            logger.log(f"FATAL: Error unpacking package {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n")
+            return logger
 
-        print(f"Replacing shaders and material...", file=sys.stderr)
+        logger.log(f"Replacing shaders and material...")
         try:
             tmp_dst_assets = self.tmp_dir/'dst'
             replacer = self.packtools_dir/'replace_shaders_and_mats_cs1.py'
@@ -69,8 +82,8 @@ class AssetPorter:
                 check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
             )
         except subprocess.CalledProcessError as e:
-            print(f"FATAL: Error replacing shaders and materials {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
-            sys.exit(1)
+            logger.log(f"FATAL: Error replacing shaders and materials {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n")
+            return logger
 
         # The rest of the script does not work on linux right now skip
         if os.path.exists('/proc/self'):
@@ -79,7 +92,7 @@ class AssetPorter:
 
         texconv_path = self.packtools_dir/'texconv.exe'
         asset_dir = Path(src_asset_tmp_path.with_suffix(''))
-        print(f"Flipping texture vertically in {asset_dir}...", file=sys.stderr)
+        logger.log(f"Flipping texture vertically in {asset_dir}...")
         for texture in asset_dir.glob('**/*.dds'):
             try:
                 tmp_dst_assets = self.tmp_dir/'dst'
@@ -93,12 +106,12 @@ class AssetPorter:
                     check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
                 )
             except subprocess.CalledProcessError as e:
-                print(f"FATAL: Error flipping texture {texture}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
-                sys.exit(1)
+                logger.log(f"FATAL: Error flipping texture {texture}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n")
+                return logger
 
 
 
-        print(f"Packing asset {src_asset_tmp_path}...", file=sys.stderr)
+        logger.log(f"Packing asset {src_asset_tmp_path}...")
         # The build_collada.py cannot properly model output path, etc. for now
         # just copy over everything we need.
         # We should fix build_collada.py eventually...
@@ -122,6 +135,8 @@ class AssetPorter:
         for f in needed_pack_tools:
             src = self.packtools_dir/f
             if not os.path.exists(src):
+                # Not logging like the other errors because this is a user
+                # error that needs action from the user.
                 print(f"packtool '{f}' missing. Cannot proceed. Please add '{f}' to '{self.packtools_dir}'.", file=sys.stderr)
                 sys.exit(1)
             # For some reason windows does not allow copying byte identical
@@ -130,7 +145,7 @@ class AssetPorter:
             if not os.path.exists(dst):
                 shutil.copy(src, asset_dir)
             else:
-                print(f"{dst} already exists, skip copying", file=sys.stderr)
+                logger.log(f"{dst} already exists, skip copying", file=sys.stderr)
 
         try:
             build_collada = src_asset_tmp_path.with_suffix('')/'build_collada_cs1.py'
@@ -141,8 +156,8 @@ class AssetPorter:
                 check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
             )
         except subprocess.CalledProcessError as e:
-            print(f"FATAL: Error re-packing (build_collda_cs1.py) asset {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
-            sys.exit(1)
+            logger.log(f"FATAL: Error re-packing (build_collda_cs1.py) asset {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n")
+            return logger
 
         try:
             path = src_asset_tmp_path.with_suffix('')/'RunMe.bat'
@@ -151,11 +166,12 @@ class AssetPorter:
                 check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL, cwd=src_asset_tmp_path.with_suffix('')
             )
         except subprocess.CalledProcessError as e:
-            print(f"FATAL: Error re-packing (RunMe.bat) asset {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n", file=sys.stderr)
-            sys.exit(1)
+            logger.log(f"FATAL: Error re-packing (RunMe.bat) asset {src_asset_tmp_path}:\nSTDERR:\n{e.stderr}\nSTDOUT:\n{e.stdout}\n")
+            return logger
 
         shutil.copy(src_asset_tmp_path.with_suffix('')/Path(asset+'.pkg'), self.out_dir)
-        print(f"finished packing {asset}", file=sys.stderr)
+        logger.log(f"finished packing {asset}")
+        return None
 
 def main():
     parser = argparse.ArgumentParser(
@@ -245,8 +261,18 @@ def main():
             packtools_dir = PACKTOOLS_DIR,
             flip_textures_vertically = args.flip_textures_vertically)
 
+    error_log = ""
     for asset in assets:
-        asset_porter.port(asset)
+        logger = asset_porter.port(asset)
+        if logger is not None:
+            error_log += f'Failed porting asset {asset}:\n' + logger.get_log() + '\n'
+
+    if error_log != "":
+        with open('errors.txt', 'w') as f:
+            f.write(error_log)
+        print('WARNING: encountered errors while porting assets. This might be a bug in this script or the underlying packtools. Find all errors in errors.txt')
+        input("Press Enter to continue.")
+
 
 if __name__ == "__main__":
     main()
