@@ -65,29 +65,35 @@ def unpack_package(pkg_path_in_tmp: Path, packtools_dir: Path) -> None:
         print(f"FATAL: Error unpacking package {pkg_path_in_tmp}:\n{e.stderr}", file=sys.stderr)
         sys.exit(1)
 
+# return a set of assets to unpack and a mapping and a tuple of
+# shader, replacement_shader, replacement_skinned_shader, file
+# the replacement_shader and replacement_skinned_shader might be empty.
 def find_appropriate_cs1_shaders(
-        shaders: [Path],
+        shaders: [str, str],
         shader_db: dict[str, str],
         TMP_DIR: Path,
-        packtools_dir: Path) -> Tuple[Set[Path], List[Tuple[str, str, str]]]:
+        packtools_dir: Path) -> Tuple[Set[Path], List[Tuple[str, str, str, str]]]:
     packages_to_unpack: Set[Path] = set()
-    shader_mapping: List[Tuple[str, str, str]] = []
-    for shader_path in shaders:
-        base_name = shader_path.stem
+    shader_mapping: List[Tuple[str, str, str, str]] = []
+    for (base_name, skinned_base_name) in shaders:
         closest_shader = base_name
+        closest_skinned_shader = skinned_base_name
 
         # Check if the shader is in the database
-        cs1_pkg = shader_db.get(base_name)
+        lookup_shader = base_name
+        if skinned_base_name != "":
+            lookup_shader = skinned_base_name
+        cs1_pkg = shader_db.get(lookup_shader)
 
         # If not, find a similar one
         if not cs1_pkg:
-            print(f"Shader '{base_name}' not in database. Finding a similar one...")
+            print(f"Shader '{lookup_shader}' not in database. Finding a similar one...")
 
             try:
                 cli_args = [
                     'python',
                     str(packtools_dir/'find_similar_shaders.py'),
-                    f'-s={base_name}',
+                    f'-s={lookup_shader}',
                     '-g=cs1',
                     '-nr',
                     f'-w=shader_weights.txt']
@@ -97,6 +103,22 @@ def find_appropriate_cs1_shaders(
                 )
                 closest_shader = result.stdout.strip()
                 cs1_pkg = shader_db.get(closest_shader)
+
+                if skinned_base_name != "":
+                    closest_skinned_shader = closest_shader
+                    cli_args = [
+                        'python',
+                        str(packtools_dir/'find_similar_shaders.py'),
+                        f'-s={closest_skinned_shader}',
+                        '-g=cs1',
+                        '-nr',
+                        f'-w=skinned_removal_weights.txt']
+                    result = subprocess.run(
+                        cli_args,
+                        capture_output=True, text=True, check=True, encoding='utf-8'
+                    )
+                    closest_shader = result.stdout.strip()
+
                 print(f"\t...found {closest_shader} in {cs1_pkg} as replacement.")
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 print(f"FATAL: Error finding similar shader for {base_name}: {e}", file=sys.stderr)
@@ -108,35 +130,39 @@ def find_appropriate_cs1_shaders(
         # Record the mapping and the package to be unpacked
         packages_to_unpack.add(Path(cs1_pkg))
         asset_path_for_csv = TMP_DIR / Path(cs1_pkg).stem
-        shader_mapping.append((base_name, closest_shader, asset_path_for_csv))
+        # We assume that the skinned and non-skinned shaders are always in the same asset.
+        shader_mapping.append((base_name, closest_shader, closest_skinned_shader, asset_path_for_csv))
 
     return packages_to_unpack, shader_mapping
 
 def replace_materials(
-        shader_mapping: Tuple[str,str,str],
+        shader_mapping: Tuple[str,str,str,str],
         metadata_filepath: Path,
         map_dir: Path):
     with open(metadata_filepath, 'rb') as f:
         metadata = json.loads(f.read())
-    shader_map = dict((row[0], (row[1],row[2])) for row in shader_mapping)
+    shader_map = dict((row[0], (row[1],row[2],row[3])) for row in shader_mapping)
     files_to_shaders_to_materials = {}
     mats = metadata["materials"]
     for (m, v) in mats.items():
         shader = v["shader"].removeprefix("shaders/")
         if shader in shader_map:
             mapping = shader_map[shader]
-            replace_shader, file = mapping[0], mapping[1]
+            replace_shader, replace_skinned_shader, file = mapping[0], mapping[1], mapping[2]
             if shader != replace_shader:
                 shader = replace_shader
                 v["shader"] = "shaders/"+shader
                 if "vertex_color_shader" in v:
                     v["vertex_color_shader"] = "shaders/"+shader
+                if "skinned_shader" in v:
+                    v["skinned_shader"] = "shaders/"+replace_skinned_shader
             if not file in files_to_shaders_to_materials:
                 files_to_shaders_to_materials[file]={}
             shader_to_material = files_to_shaders_to_materials[file]
             if not shader in shader_to_material:
-                shader_to_material[shader] = []
-            shader_to_material[shader].append(m)
+                shader_to_material[shader] = (replace_skinned_shader, [])
+            shader_to_material[shader][1].append(m)
+
     for (donor_asset, stm) in files_to_shaders_to_materials.items():
         donor_mats = {}
         for d in glob.glob(str(donor_asset)+"/metadata*.json"):
@@ -144,11 +170,14 @@ def replace_materials(
                 donor = json.loads(f.read())
                 donor_mats.update({ v["shader"].removeprefix("shaders/"): v for (k,v) in donor["materials"].items() if v["shader"].removeprefix("shaders/") in stm })
                 donor_mats.update({ v["shader"].removeprefix("Shaders/"): v for (k,v) in donor["materials"].items() if v["shader"].removeprefix("Shaders/") in stm })
-        for (s, ms) in stm.items():
+        for (s, (ss,ms)) in stm.items():
             # Copy the shader.
             shader_source = Path(f"{donor_asset}/{Path(donor_asset).stem}/{s}.phyre")
             if shader_source.is_file():
                 shutil.copy(shader_source, map_dir)
+                if ss != "":
+                    skinned_shader_source = Path(f"{donor_asset}/{Path(donor_asset).stem}/{ss}.phyre")
+                    shutil.copy(skinned_shader_source, map_dir)
                 if DEBUG:
                     print(f"Copied {shader_source} to {map_dir}")
             else:
@@ -193,6 +222,21 @@ def merge_mats(dst, src):
         if "shaderSwitches" in src:
             dst["shaderSwitches"] = merge_dicts(dst["shaderSwitches"], src["shaderSwitches"])
     return dst
+
+def find_shaders_to_port(DIR_TO_PORT: Path) -> set[(str, str)]:
+    ret = set[(str, str)]()
+    for metadata_path in DIR_TO_PORT.glob(f"metadata*.json"):
+        with open(metadata_path, 'rb') as f:
+            metadata = json.loads(f.read())
+        for (_,mat) in metadata["materials"].items():
+            s = Path(mat["shader"]).name
+            if not s.startswith('ed8.fx#'):
+                continue
+            ss = ""
+            if "skinned_shader" in mat:
+                ss = Path(mat["skinned_shader"]).name
+            ret.add((str(s),str(ss)))
+    return ret
 
 # --- Main Script Logic ---
 
@@ -246,7 +290,6 @@ def main():
         type=Path,
         metavar='M_T4040/',
         nargs='?',
-        default='.',
         help="The directory of the unpacked asset to replace shaders and materials in."
     )
 
@@ -285,8 +328,9 @@ def main():
 
     # --- Phase 1: Determine which assets to unpack and which shaders to copy ---
     print("\n--- Phase 1: Computing asset requirements ---")
-
-    shaders = list(DIR_TO_PORT.glob(f"{MAP_NAME}/ed8.fx#*.phyre"))
+    shaders = find_shaders_to_port(DIR_TO_PORT)
+    if DEBUG:
+        print(shaders)
     print(f"Found {len(shaders)} shaders to process in '{map_dir}'.")
 
     packages_to_unpack, shader_mapping =  find_appropriate_cs1_shaders(shaders, shader_db, TMP_DIR, PACKTOOLS_DIR)
@@ -335,7 +379,7 @@ def main():
             if os.path.exists(path):
                 found.append(d)
                 asset_path = TMP_DIR / base
-                shader_mapping.append((d, d, asset_path))
+                shader_mapping.append((d, d, "", asset_path))
         default_shaders = [d for d in default_shaders if d not in found]
 
     # check if we found all required default shaders
@@ -352,15 +396,17 @@ def main():
         dest_path = TMP_DIR / well_known_asset
         unpack_package(dest_path, PACKTOOLS_DIR)
         for d in defaults:
-            shader_mapping.append((d, d, dest_path.with_suffix("")))
+            shader_mapping.append((d, d, "", dest_path.with_suffix("")))
 
     print("All packages unpacked successfully.")
 
     # --- Phase 3: Copy all shaders and write the mapping file (single-threaded) ---
     print("\n--- Phase 3: Copying shaders and updating metadata file ---")
     # TODO loop over all metadata*.json?
-    for shader_path in shaders:
-        os.remove(shader_path)
+    for (shader_path, skinned_shader_path) in shaders:
+        os.remove(Path(MAP_NAME)/(shader_path+".phyre"))
+        if skinned_shader_path != "":
+            os.remove(Path(MAP_NAME)/(skinned_shader_path+".phyre"))
 
     for metadata_path in DIR_TO_PORT.glob(f"metadata*.json"):
         replace_materials(shader_mapping, metadata_path, map_dir)
