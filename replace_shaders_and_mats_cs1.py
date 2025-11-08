@@ -404,9 +404,9 @@ def main():
     print("\n--- Phase 3: Copying shaders and updating metadata file ---")
     # TODO loop over all metadata*.json?
     for (shader_path, skinned_shader_path) in shaders:
-        os.remove(Path(MAP_NAME)/(shader_path+".phyre"))
+        os.remove(Path(DIR_TO_PORT)/MAP_NAME/(shader_path+".phyre"))
         if skinned_shader_path != "":
-            os.remove(Path(MAP_NAME)/(skinned_shader_path+".phyre"))
+            os.remove(Path(DIR_TO_PORT)/MAP_NAME/(skinned_shader_path+".phyre"))
 
     for metadata_path in DIR_TO_PORT.glob(f"metadata*.json"):
         replace_materials(shader_mapping, metadata_path, map_dir)
